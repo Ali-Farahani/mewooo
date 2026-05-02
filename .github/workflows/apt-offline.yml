@@ -1,59 +1,60 @@
-name: apt-offline bundle
+name: ⬇️ 2-Build apt-offline bundle
 
 on:
   workflow_dispatch:
     inputs:
       sig_base64:
-        description: "Base64 content of apt-offline .sig file"
+        description: 'Base64 content of apt-offline .sig file'
         required: true
         type: string
       output_name:
-        description: "Output bundle name"
-        required: true
-        default: "full-upgrade.zip"
+        description: 'Output bundle name'
+        required: false
+        default: 'full-upgrade.zip'
         type: string
 
 jobs:
-  build:
+  build-bundle:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     container:
       image: debian:trixie
 
     steps:
-      - name: Install tools
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install apt-offline
         run: |
           set -eux
           apt-get update
-          apt-get install -y apt-offline ca-certificates
+          apt-get install -y apt-offline ca-certificates file
 
-      - name: Decode sig
-        shell: bash
+      - name: Decode signature
         run: |
           set -eux
-          printf '%s' '${{ inputs.sig_base64 }}' | base64 -d > request.sig
-          ls -lh
-          file request.sig || true
-          wc -c request.sig
+          mkdir -p work downloads
+          printf '%s' '${{ inputs.sig_base64 }}' | base64 -d > work/request.sig
+          ls -lh work/request.sig
+          file work/request.sig || true
+          wc -c work/request.sig
 
-      - name: Show sig content header
-        shell: bash
+      - name: Build apt-offline bundle
         run: |
           set -eux
-          head -c 300 request.sig || true
-          echo
+          apt-offline get work/request.sig --bundle "downloads/${{ inputs.output_name }}"
+          ls -lah downloads
+          test -f "downloads/${{ inputs.output_name }}"
+          test -s "downloads/${{ inputs.output_name }}"
 
-      - name: Download packages
-        shell: bash
+      - name: Commit and Push bundle
         run: |
           set -eux
-          apt-offline get request.sig --bundle "${{ inputs.output_name }}"
-          ls -lah
-          test -f "${{ inputs.output_name }}"
-          test -s "${{ inputs.output_name }}"
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: apt-offline-bundle
-          path: ${{ inputs.output_name }}
-          if-no-files-found: error
+          git add downloads/"${{ inputs.output_name }}"
+          git commit -m "Add apt-offline bundle: ${{ inputs.output_name }} [skip ci]" || echo "Nothing to commit"
+          git push
