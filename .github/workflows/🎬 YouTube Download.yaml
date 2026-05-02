@@ -9,8 +9,8 @@ on:
         type: string
 
       cookies_b64:
-        description: "Optional: Base64 content of cookies.txt"
-        required: false
+        description: "Base64 content of cookies.txt"
+        required: true
         type: string
 
       quality:
@@ -35,6 +35,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mark repo safe
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -70,9 +77,13 @@ jobs:
 
           mkdir -p downloads
           rm -f cookies.txt
+
+          # Clean previous downloaded files from downloads folder
           find downloads -mindepth 1 -maxdepth 1 -type f -delete || true
 
-      - name: Decode cookies if provided
+          ls -lh downloads/ || true
+
+      - name: Decode cookies
         env:
           COOKIES_B64: ${{ github.event.inputs.cookies_b64 }}
         run: |
@@ -80,12 +91,11 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           if [ -z "${COOKIES_B64:-}" ]; then
-            echo "No cookies_b64 provided."
-            echo "Workflow will try to download WITHOUT cookies."
-            exit 0
+            echo "ERROR: cookies_b64 is required."
+            exit 1
           fi
 
-          echo "cookies_b64 provided. Decoding..."
+          echo "Decoding cookies..."
 
           printf '%s' "$COOKIES_B64" | base64 -d > cookies.txt
 
@@ -94,16 +104,13 @@ jobs:
             exit 1
           fi
 
-          echo "cookies.txt created:"
-          ls -lh cookies.txt
-
-          echo "cookies.txt first lines:"
-          head -n 3 cookies.txt || true
-
           if ! grep -q "Netscape HTTP Cookie File" cookies.txt; then
             echo "ERROR: cookies.txt does not look like a valid Netscape cookies file."
             exit 1
           fi
+
+          echo "cookies.txt decoded successfully."
+          ls -lh cookies.txt
 
       - name: Download video
         env:
@@ -115,47 +122,20 @@ jobs:
 
           mkdir -p downloads
 
-          COMMON_ARGS="
-            --js-runtimes node
-            --remote-components ejs:github
-            --retries 10
-            --fragment-retries 10
-            --extractor-retries 10
-            --no-playlist
-            --merge-output-format mp4
-          "
+          echo "Downloading WITH cookies..."
 
-          if [ -f cookies.txt ]; then
-            echo "Downloading WITH cookies."
-
-            yt-dlp \
-              --cookies cookies.txt \
-              --js-runtimes node \
-              --remote-components ejs:github \
-              --retries 10 \
-              --fragment-retries 10 \
-              --extractor-retries 10 \
-              --no-playlist \
-              -f "$QUALITY" \
-              --merge-output-format mp4 \
-              -o "downloads/%(title).200s [%(id)s].%(ext)s" \
-              "$VIDEO_URL"
-          else
-            echo "Downloading WITHOUT cookies."
-
-            yt-dlp \
-              --no-cookies \
-              --js-runtimes node \
-              --remote-components ejs:github \
-              --retries 10 \
-              --fragment-retries 10 \
-              --extractor-retries 10 \
-              --no-playlist \
-              -f "$QUALITY" \
-              --merge-output-format mp4 \
-              -o "downloads/%(title).200s [%(id)s].%(ext)s" \
-              "$VIDEO_URL"
-          fi
+          yt-dlp \
+            --cookies cookies.txt \
+            --js-runtimes node \
+            --remote-components ejs:github \
+            --retries 10 \
+            --fragment-retries 10 \
+            --extractor-retries 10 \
+            --no-playlist \
+            -f "$QUALITY" \
+            --merge-output-format mp4 \
+            -o "downloads/%(title).200s [%(id)s].%(ext)s" \
+            "$VIDEO_URL"
 
           echo "Downloaded files:"
           ls -lh downloads/
@@ -170,6 +150,7 @@ jobs:
           LIMIT_BYTES=$((SPLIT_MB * 1024 * 1024))
 
           echo "Split limit: ${SPLIT_MB} MB"
+          echo "Limit bytes: ${LIMIT_BYTES}"
 
           find downloads -type f ! -name "*.part-*" ! -name "INSTRUCTIONS.txt" -print | while IFS= read -r FILE
           do
@@ -187,6 +168,7 @@ jobs:
             fi
           done
 
+          echo "Final downloads folder:"
           ls -lh downloads/
 
       - name: Write instructions
@@ -197,15 +179,42 @@ jobs:
           {
             echo "Downloaded YouTube files are in this folder."
             echo
-            echo "If the file was split, reassemble with:"
-            echo "  cat video.mp4.part-* > video.mp4"
+            echo "If the video was split, you will see files like:"
+            echo "  video.mp4.part-000"
+            echo "  video.mp4.part-001"
+            echo "  video.mp4.part-002"
+            echo
+            echo "To reassemble split files on Linux:"
+            echo "  cat *.part-* > output.mp4"
             echo
             echo "Example:"
             echo "  cat *.mp4.part-* > output.mp4"
+            echo
+            echo "If there is a normal .mp4 file and no .part-* files, just download the .mp4 file directly."
           } > downloads/INSTRUCTIONS.txt
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: youtube-video
-          path: downloads/*
+          ls -lh downloads/INSTRUCTIONS.txt
+
+      - name: Commit and push downloads folder
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+          # Important: do not commit cookies
+          rm -f cookies.txt
+
+          git add -A downloads/
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "Add YouTube downloaded video [skip ci]"
+
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
