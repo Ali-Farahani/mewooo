@@ -1,0 +1,25 @@
+name: apt-offline
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install apt-offline
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-offline
+
+      - name: Download apt files
+        run: |
+          apt-offline get update.sig --bundle update.zip
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: update
+          path: update.zip
