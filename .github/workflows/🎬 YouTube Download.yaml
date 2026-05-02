@@ -30,6 +30,21 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mark repo safe
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install tools
         run: |
           set -eu
@@ -42,18 +57,14 @@ jobs:
 
           sudo chmod +x /usr/local/bin/yt-dlp
 
+          echo "yt-dlp version:"
           yt-dlp --version
+
+          echo "ffmpeg version:"
           ffmpeg -version | head -n 1
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Mark repo safe
-        run: |
-          set -eu
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "node version:"
+          node --version
 
       - name: Prepare workspace
         run: |
@@ -63,8 +74,7 @@ jobs:
           mkdir -p downloads
 
           rm -f cookies.txt
-          rm -f downloads/*
-          rm -f downloads/INSTRUCTIONS.txt
+          find downloads -mindepth 1 -maxdepth 1 -type f -delete || true
 
       - name: Prepare cookies from input
         env:
@@ -73,11 +83,18 @@ jobs:
           set -eu
           cd "$GITHUB_WORKSPACE"
 
-          if [ -n "$COOKIES_B64" ]; then
+          if [ -n "${COOKIES_B64:-}" ]; then
             printf '%s' "$COOKIES_B64" | base64 -d > cookies.txt
             test -s cookies.txt
+
             echo "cookies.txt created"
             ls -lh cookies.txt
+            head -n 3 cookies.txt || true
+
+            if ! grep -q "Netscape HTTP Cookie File" cookies.txt; then
+              echo "cookies.txt does not look like a Netscape cookie file"
+              exit 1
+            fi
           else
             echo "No cookies input provided"
           fi
@@ -93,15 +110,27 @@ jobs:
           mkdir -p downloads
 
           if [ -f cookies.txt ]; then
+            echo "Downloading with cookies"
             yt-dlp \
               --cookies cookies.txt \
+              --js-runtimes node \
+              --remote-components ejs:github \
+              --retries 10 \
+              --fragment-retries 10 \
+              --extractor-retries 10 \
               -f "$QUALITY" \
               --merge-output-format mp4 \
               --no-playlist \
               -o "downloads/%(title).200s [%(id)s].%(ext)s" \
               "$VIDEO_URL"
           else
+            echo "Downloading without cookies"
             yt-dlp \
+              --js-runtimes node \
+              --remote-components ejs:github \
+              --retries 10 \
+              --fragment-retries 10 \
+              --extractor-retries 10 \
               -f "$QUALITY" \
               --merge-output-format mp4 \
               --no-playlist \
@@ -109,6 +138,7 @@ jobs:
               "$VIDEO_URL"
           fi
 
+          echo "Downloaded files:"
           ls -lh downloads/
 
       - name: Split large files if needed
