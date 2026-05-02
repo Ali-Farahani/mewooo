@@ -11,20 +11,23 @@ on:
 jobs:
   apt-offline:
     runs-on: ubuntu-latest
+    container: debian:trixie
+
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install apt-offline
+      - name: Install tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y apt-offline
+          apt-get update
+          apt-get install -y git ca-certificates apt-offline
+
+      - uses: actions/checkout@v4
 
       - name: Create update.sig
         run: |
-          echo "${{ github.event.inputs.sig_b64 }}" | base64 -d > update.sig
+          printf '%s' "${{ github.event.inputs.sig_b64 }}" | base64 -d > update.sig
+          head -n 5 update.sig
 
       - name: Download bundle
         run: |
@@ -33,6 +36,7 @@ jobs:
 
       - name: Commit bundle
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add downloads/update.zip
