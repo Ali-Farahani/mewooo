@@ -1,4 +1,4 @@
-name: 🎬 YouTube Download
+name: 🎬 YouTube Download With Cookies
 
 on:
   workflow_dispatch:
@@ -24,10 +24,17 @@ jobs:
           sudo apt-get install -y ffmpeg python3-pip
           python3 -m pip install -U yt-dlp
 
+      - name: Create cookies file
+        run: |
+          cat > cookies.txt << 'EOF'
+          ${{ secrets.YT_COOKIES }}
+          EOF
+
       - name: Download video
         run: |
           mkdir -p downloads
           yt-dlp \
+            --cookies cookies.txt \
             -f "${{ github.event.inputs.quality }}" \
             --merge-output-format mp4 \
             -o "downloads/%(title).200s [%(id)s].%(ext)s" \
