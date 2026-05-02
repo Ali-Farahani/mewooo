@@ -1,65 +1,195 @@
-name: 🎬 YouTube Download
+name: youtube-download
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'YouTube video URL'
+        description: "YouTube video URL"
         required: true
         type: string
       cookies_b64:
-        description: 'Base64 of cookies.txt (optional)'
+        description: "Base64 of cookies.txt optional"
         required: false
         type: string
       quality:
-        description: 'Quality format'
+        description: "yt-dlp format selector"
         required: false
-        default: 'bv*+ba/b'
+        default: "bv*+ba/b"
+        type: string
+      split_size_mb:
+        description: "Maximum size per file in MB"
+        required: false
+        default: "90"
         type: string
 
 jobs:
   download:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     steps:
-      - name: Install yt-dlp and ffmpeg
+      - name: Install tools
         run: |
+          set -eu
           sudo apt-get update
-          sudo apt-get install -y ffmpeg python3-pip
-          python3 -m pip install -U yt-dlp
+          sudo apt-get install -y git ca-certificates coreutils curl ffmpeg
+
+          sudo curl -L \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+            -o /usr/local/bin/yt-dlp
+
+          sudo chmod +x /usr/local/bin/yt-dlp
+
+          yt-dlp --version
+          ffmpeg -version | head -n 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mark repo safe
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Prepare workspace
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          mkdir -p downloads
+
+          rm -f cookies.txt
+          rm -f downloads/*
+          rm -f downloads/INSTRUCTIONS.txt
 
       - name: Prepare cookies from input
+        env:
+          COOKIES_B64: ${{ github.event.inputs.cookies_b64 }}
         run: |
-          if [ -n "${{ github.event.inputs.cookies_b64 }}" ]; then
-            echo "${{ github.event.inputs.cookies_b64 }}" | base64 -d > cookies.txt
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          if [ -n "$COOKIES_B64" ]; then
+            printf '%s' "$COOKIES_B64" | base64 -d > cookies.txt
+            test -s cookies.txt
             echo "cookies.txt created"
-            head -n 1 cookies.txt
             ls -lh cookies.txt
           else
             echo "No cookies input provided"
           fi
 
       - name: Download video
+        env:
+          VIDEO_URL: ${{ github.event.inputs.url }}
+          QUALITY: ${{ github.event.inputs.quality }}
         run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
           mkdir -p downloads
 
           if [ -f cookies.txt ]; then
             yt-dlp \
               --cookies cookies.txt \
-              -f "${{ github.event.inputs.quality }}" \
+              -f "$QUALITY" \
               --merge-output-format mp4 \
+              --no-playlist \
               -o "downloads/%(title).200s [%(id)s].%(ext)s" \
-              "${{ github.event.inputs.url }}"
+              "$VIDEO_URL"
           else
             yt-dlp \
-              -f "${{ github.event.inputs.quality }}" \
+              -f "$QUALITY" \
               --merge-output-format mp4 \
+              --no-playlist \
               -o "downloads/%(title).200s [%(id)s].%(ext)s" \
-              "${{ github.event.inputs.url }}"
+              "$VIDEO_URL"
           fi
+
+          ls -lh downloads/
+
+      - name: Split large files if needed
+        env:
+          SPLIT_MB: ${{ github.event.inputs.split_size_mb }}
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          LIMIT_BYTES=$((SPLIT_MB * 1024 * 1024))
+
+          echo "Split limit: $SPLIT_MB MB"
+          echo "Limit bytes: $LIMIT_BYTES"
+
+          find downloads -type f ! -name "*.part-*" ! -name "INSTRUCTIONS.txt" -print | while IFS= read -r FILE
+          do
+            SIZE_BYTES="$(stat -c%s "$FILE")"
+
+            echo "Checking: $FILE"
+            echo "Size: $SIZE_BYTES bytes"
+
+            if [ "$SIZE_BYTES" -gt "$LIMIT_BYTES" ]; then
+              echo "Splitting: $FILE"
+
+              split -b "${SPLIT_MB}M" -d -a 3 "$FILE" "${FILE}.part-"
+              rm -f "$FILE"
+
+              echo "Split done for: $FILE"
+            else
+              echo "No split needed for: $FILE"
+            fi
+          done
+
+          ls -lh downloads/
+
+      - name: Write instructions
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          {
+            echo "Downloaded YouTube files are in this folder."
+            echo
+            echo "If you see files like:"
+            echo "  video.mp4.part-000"
+            echo "  video.mp4.part-001"
+            echo "  video.mp4.part-002"
+            echo
+            echo "Reassemble them with:"
+            echo "  cat video.mp4.part-* > video.mp4"
+            echo
+            echo "Example:"
+            echo "  cat *.mp4.part-* > output.mp4"
+            echo
+            echo "If the video was not split, just use the downloaded file directly."
+          } > downloads/INSTRUCTIONS.txt
+
+          ls -lh downloads/INSTRUCTIONS.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-video
           path: downloads/*
+
+      - name: Commit and push downloads folder
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+          git add downloads/
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "Add downloaded YouTube video [skip ci]"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
