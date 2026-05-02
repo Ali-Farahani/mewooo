@@ -1,129 +1,40 @@
-name: 🎬 2-YouTube Download
+name: 🎬 YouTube Download
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'YouTube video or playlist URL'
+        description: 'YouTube video URL'
         required: true
         type: string
       quality:
-        description: 'Video quality/formats'
+        description: 'Quality format'
         required: false
-        default: 'best[height<=720]/best'
+        default: 'bv*+ba/b'
         type: string
-      mode:
-        description: 'Save mode'
-        required: false
-        default: 'artifact'
-        type: choice
-        options:
-          - artifact
-          - repo
-      split_threshold_mb:
-        description: 'Split files larger than this MB (0 = never split)'
-        required: false
-        default: 90
-        type: number
 
 jobs:
-  download-youtube:
+  download:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install dependencies
+      - name: Install yt-dlp and ffmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg zip python3-pip
+          sudo apt-get install -y ffmpeg python3-pip
           python3 -m pip install -U yt-dlp
 
-      - name: AVASAM Downloader - YouTube Mode
+      - name: Download video
         run: |
-          echo "🏷️ AVASAM - YouTube Download Mode"
-          echo "🌐 https://avasam.ir"
-          echo ""
-
-      - name: Download from YouTube
-        run: |
-          URL="${{ github.event.inputs.url }}"
-          QUALITY="${{ github.event.inputs.quality }}"
-          MODE="${{ github.event.inputs.mode }}"
-          SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
-          SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
-
-          echo "🎬 URL: $URL"
-          echo "📺 QUALITY: $QUALITY"
-          echo "💾 MODE: $MODE"
-          echo "✂️ SPLIT THRESHOLD: $SPLIT_THRESHOLD_MB MB"
-
-          mkdir -p downloads tmp_downloads
-
+          mkdir -p downloads
           yt-dlp \
-            -f "$QUALITY" \
+            -f "${{ github.event.inputs.quality }}" \
             --merge-output-format mp4 \
-            --write-auto-subs \
-            --sub-langs "en,fa" \
-            --convert-subs srt \
-            -o "tmp_downloads/%(title).200s [%(id)s].%(ext)s" \
-            "$URL"
-
-          # Split large files if needed
-          for FILE in tmp_downloads/*; do
-            [ -f "$FILE" ] || continue
-            SIZE=$(stat -c%s "$FILE")
-            BASENAME=$(basename "$FILE")
-
-            if [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
-              echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting into ${SPLIT_THRESHOLD_MB}MB parts"
-              zip -0 -s "${SPLIT_THRESHOLD_MB}m" "downloads/${BASENAME}.zip" -j "$FILE"
-            else
-              cp "$FILE" "downloads/$BASENAME"
-            fi
-          done
+            -o "downloads/%(title).200s [%(id)s].%(ext)s" \
+            "${{ github.event.inputs.url }}"
 
       - name: Upload artifact
-        if: ${{ github.event.inputs.mode == 'artifact' }}
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-download
+          name: youtube-video
           path: downloads/*
-
-      - name: Commit & Push in batches of 5 files
-        if: ${{ github.event.inputs.mode == 'repo' }}
-        run: |
-          BRANCH="${GITHUB_REF_NAME}"
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-
-          mapfile -t ALL_FILES < <(git ls-files --others --modified --exclude-standard downloads/)
-
-          TOTAL=${#ALL_FILES[@]}
-          echo "📦 Total files to push: $TOTAL"
-
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "Nothing to commit"
-            exit 0
-          fi
-
-          BATCH_SIZE=5
-          BATCH_NUM=0
-
-          for (( i=0; i<TOTAL; i+=BATCH_SIZE )); do
-            BATCH_NUM=$(( BATCH_NUM + 1 ))
-            BATCH=("${ALL_FILES[@]:i:BATCH_SIZE}")
-
-            echo "🚀 Pushing batch $BATCH_NUM"
-
-            git add "${BATCH[@]}"
-            git commit -m "[YT-DLP] Add downloaded files — batch $BATCH_NUM [skip ci]"
-
-            git pull --rebase origin "$BRANCH"
-            git push origin HEAD:"$BRANCH"
-          done
