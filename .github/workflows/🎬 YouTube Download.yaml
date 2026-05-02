@@ -16,7 +16,6 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-
     steps:
       - name: Install yt-dlp and ffmpeg
         run: |
