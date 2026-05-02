@@ -1,0 +1,34 @@
+name: YouTube Download
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "YouTube video URL"
+        required: true
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install yt-dlp and ffmpeg
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg python3-pip
+          python3 -m pip install -U yt-dlp
+
+      - name: Download video
+        run: |
+          mkdir -p downloads
+          yt-dlp -f "bv*+ba/b" --merge-output-format mp4 -P downloads "${{ github.event.inputs.url }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-video
+          path: downloads/*
