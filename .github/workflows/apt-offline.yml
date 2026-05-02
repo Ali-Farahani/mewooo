@@ -25,12 +25,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Install apt-offline
         run: |
           set -eux
           apt-get update
-          apt-get install -y apt-offline ca-certificates file
+          apt-get install -y apt-offline ca-certificates file git
 
       - name: Decode signature
         run: |
@@ -52,9 +55,20 @@ jobs:
       - name: Commit and Push bundle
         run: |
           set -eux
+
+          BRANCH="${GITHUB_REF_NAME}"
+          echo "Current branch: $BRANCH"
+
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
 
-          git add downloads/"${{ inputs.output_name }}"
+          git status
+          ls -lah downloads
+
+          git add "downloads/${{ inputs.output_name }}"
+          git status
+
           git commit -m "Add apt-offline bundle: ${{ inputs.output_name }} [skip ci]" || echo "Nothing to commit"
-          git push
+
+          git pull --rebase origin "$BRANCH"
+          git push origin HEAD:"$BRANCH"
