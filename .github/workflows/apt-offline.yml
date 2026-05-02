@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       sig_b64:
-        description: 'Base64 content of update.sig'
+        description: 'Base64 content of full-upgrade.sig'
         required: true
         type: string
       split_size_mb:
@@ -22,29 +22,53 @@ jobs:
     container: debian:trixie
 
     steps:
+      - name: Install base tools before checkout
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates coreutils
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install tools
+      - name: Install apt-offline and tools
         run: |
           apt-get update
-          apt-get install -y git ca-certificates apt-offline zip coreutils
+          apt-get install -y apt-offline zip
+
+      - name: Debug workspace
+        run: |
+          set -eux
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          pwd
+          ls -la "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          ls -la
+          git status
 
       - name: Create update.sig
         run: |
           set -eux
+          cd "$GITHUB_WORKSPACE"
+
           printf '%s' "${{ github.event.inputs.sig_b64 }}" | base64 -d > update.sig
+
           ls -lh update.sig
+          test -s update.sig
 
       - name: Build apt-offline bundle
         run: |
           set -eux
+          cd "$GITHUB_WORKSPACE"
+
           mkdir -p downloads
+
           rm -f downloads/update.zip
           rm -f downloads/update.zip.part-*
+
           apt-offline get update.sig --bundle downloads/update.zip
+
           ls -lh downloads/update.zip
           test -f downloads/update.zip
           test -s downloads/update.zip
@@ -52,8 +76,11 @@ jobs:
       - name: Split large bundle if needed
         run: |
           set -eux
+          cd "$GITHUB_WORKSPACE"
+
           SPLIT_MB="${{ github.event.inputs.split_size_mb }}"
           SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
+
           FILE="downloads/update.zip"
           SIZE=$(stat -c%s "$FILE")
 
@@ -64,14 +91,23 @@ jobs:
             echo "File is larger than threshold; splitting..."
             split -b "${SPLIT_MB}M" -d -a 3 "$FILE" "${FILE}.part-"
             rm -f "$FILE"
-            ls -lh downloads/
           else
             echo "No split needed."
           fi
 
+          echo "Final downloads directory:"
+          ls -lh downloads/
+
       - name: Commit & Push downloads in batches
         run: |
           set -eux
+          cd "$GITHUB_WORKSPACE"
+
+          echo "Current directory:"
+          pwd
+          ls -la
+          git status
+
           BRANCH="${GITHUB_REF_NAME}"
 
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -98,8 +134,16 @@ jobs:
             echo "Pushing batch $BATCH_NUM"
 
             git add "${BATCH[@]}"
-            git commit -m "Add apt-offline bundle batch $BATCH_NUM [skip ci]" || echo "Nothing to commit"
+
+            if git diff --cached --quiet; then
+              echo "Nothing staged for this batch"
+              continue
+            fi
+
+            git commit -m "Add apt-offline bundle batch $BATCH_NUM [skip ci]"
 
             git pull --rebase origin "$BRANCH"
             git push origin HEAD:"$BRANCH"
           done
+
+          echo "Done."
