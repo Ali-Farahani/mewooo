@@ -1,11 +1,14 @@
-name: apt-offline
+name: apt-offline-download
 
 on:
   workflow_dispatch:
 
 jobs:
-  download:
+  apt-offline:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -14,12 +17,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y apt-offline
 
-      - name: Download apt files
+      - name: Download apt offline bundle
         run: |
-          apt-offline get update.sig --bundle update.zip
+          mkdir -p downloads
+          apt-offline get update.sig --bundle downloads/update.zip
 
-      - name: Upload bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: update
-          path: update.zip
+      - name: Commit bundle
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add downloads/update.zip
+          git commit -m "Add apt-offline update bundle" || echo "Nothing to commit"
+          git push
