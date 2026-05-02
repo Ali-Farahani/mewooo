@@ -1,0 +1,48 @@
+name: YouTube Download with yt-dlp
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "YouTube video URL"
+        required: true
+        type: string
+      quality:
+        description: "Quality format"
+        required: false
+        default: "bv*+ba/b"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install yt-dlp and ffmpeg
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg python3-pip
+          python3 -m pip install -U yt-dlp
+
+      - name: Create downloads folder
+        run: mkdir -p downloads
+
+      - name: Download video
+        run: |
+          yt-dlp \
+            -f "${{ github.event.inputs.quality }}" \
+            --merge-output-format mp4 \
+            -P downloads \
+            "${{ github.event.inputs.url }}"
+
+      - name: Upload downloaded file as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-video
+          path: downloads/*
