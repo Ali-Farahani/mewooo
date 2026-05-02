@@ -35,14 +35,17 @@ jobs:
           ls -lh update.sig
           head -n 5 update.sig || true
 
+
       - name: Download bundle
         run: |
           set -eux
           mkdir -p downloads
+          rm -f downloads/update.zip
           apt-offline get update.sig --bundle downloads/update.zip
           ls -lh downloads
           test -f downloads/update.zip
           test -s downloads/update.zip
+
 
       - name: Commit bundle
         run: |
