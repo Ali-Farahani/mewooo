@@ -7,15 +7,18 @@ on:
         description: "YouTube video URL"
         required: true
         type: string
+
       cookies_b64:
-        description: "Base64 of cookies.txt optional"
+        description: "Optional: Base64 content of cookies.txt"
         required: false
         type: string
+
       quality:
         description: "yt-dlp format selector"
         required: false
         default: "bv*+ba/b"
         type: string
+
       split_size_mb:
         description: "Maximum size per file in MB"
         required: false
@@ -32,13 +35,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Mark repo safe
-        run: |
-          set -eu
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -48,8 +44,9 @@ jobs:
       - name: Install tools
         run: |
           set -eu
+
           sudo apt-get update
-          sudo apt-get install -y git ca-certificates coreutils curl ffmpeg
+          sudo apt-get install -y ffmpeg curl ca-certificates coreutils git
 
           sudo curl -L \
             https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
@@ -57,14 +54,14 @@ jobs:
 
           sudo chmod +x /usr/local/bin/yt-dlp
 
-          echo "yt-dlp version:"
+          echo "yt-dlp:"
           yt-dlp --version
 
-          echo "ffmpeg version:"
-          ffmpeg -version | head -n 1
-
-          echo "node version:"
+          echo "node:"
           node --version
+
+          echo "ffmpeg:"
+          ffmpeg -version | head -n 1
 
       - name: Prepare workspace
         run: |
@@ -72,31 +69,40 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           mkdir -p downloads
-
           rm -f cookies.txt
           find downloads -mindepth 1 -maxdepth 1 -type f -delete || true
 
-      - name: Prepare cookies from input
+      - name: Decode cookies if provided
         env:
           COOKIES_B64: ${{ github.event.inputs.cookies_b64 }}
         run: |
           set -eu
           cd "$GITHUB_WORKSPACE"
 
-          if [ -n "${COOKIES_B64:-}" ]; then
-            printf '%s' "$COOKIES_B64" | base64 -d > cookies.txt
-            test -s cookies.txt
+          if [ -z "${COOKIES_B64:-}" ]; then
+            echo "No cookies_b64 provided."
+            echo "Workflow will try to download WITHOUT cookies."
+            exit 0
+          fi
 
-            echo "cookies.txt created"
-            ls -lh cookies.txt
-            head -n 3 cookies.txt || true
+          echo "cookies_b64 provided. Decoding..."
 
-            if ! grep -q "Netscape HTTP Cookie File" cookies.txt; then
-              echo "cookies.txt does not look like a Netscape cookie file"
-              exit 1
-            fi
-          else
-            echo "No cookies input provided"
+          printf '%s' "$COOKIES_B64" | base64 -d > cookies.txt
+
+          if [ ! -s cookies.txt ]; then
+            echo "ERROR: cookies.txt is empty after decoding."
+            exit 1
+          fi
+
+          echo "cookies.txt created:"
+          ls -lh cookies.txt
+
+          echo "cookies.txt first lines:"
+          head -n 3 cookies.txt || true
+
+          if ! grep -q "Netscape HTTP Cookie File" cookies.txt; then
+            echo "ERROR: cookies.txt does not look like a valid Netscape cookies file."
+            exit 1
           fi
 
       - name: Download video
@@ -109,8 +115,19 @@ jobs:
 
           mkdir -p downloads
 
+          COMMON_ARGS="
+            --js-runtimes node
+            --remote-components ejs:github
+            --retries 10
+            --fragment-retries 10
+            --extractor-retries 10
+            --no-playlist
+            --merge-output-format mp4
+          "
+
           if [ -f cookies.txt ]; then
-            echo "Downloading with cookies"
+            echo "Downloading WITH cookies."
+
             yt-dlp \
               --cookies cookies.txt \
               --js-runtimes node \
@@ -118,22 +135,24 @@ jobs:
               --retries 10 \
               --fragment-retries 10 \
               --extractor-retries 10 \
+              --no-playlist \
               -f "$QUALITY" \
               --merge-output-format mp4 \
-              --no-playlist \
               -o "downloads/%(title).200s [%(id)s].%(ext)s" \
               "$VIDEO_URL"
           else
-            echo "Downloading without cookies"
+            echo "Downloading WITHOUT cookies."
+
             yt-dlp \
+              --no-cookies \
               --js-runtimes node \
               --remote-components ejs:github \
               --retries 10 \
               --fragment-retries 10 \
               --extractor-retries 10 \
+              --no-playlist \
               -f "$QUALITY" \
               --merge-output-format mp4 \
-              --no-playlist \
               -o "downloads/%(title).200s [%(id)s].%(ext)s" \
               "$VIDEO_URL"
           fi
@@ -150,8 +169,7 @@ jobs:
 
           LIMIT_BYTES=$((SPLIT_MB * 1024 * 1024))
 
-          echo "Split limit: $SPLIT_MB MB"
-          echo "Limit bytes: $LIMIT_BYTES"
+          echo "Split limit: ${SPLIT_MB} MB"
 
           find downloads -type f ! -name "*.part-*" ! -name "INSTRUCTIONS.txt" -print | while IFS= read -r FILE
           do
@@ -162,13 +180,10 @@ jobs:
 
             if [ "$SIZE_BYTES" -gt "$LIMIT_BYTES" ]; then
               echo "Splitting: $FILE"
-
               split -b "${SPLIT_MB}M" -d -a 3 "$FILE" "${FILE}.part-"
               rm -f "$FILE"
-
-              echo "Split done for: $FILE"
             else
-              echo "No split needed for: $FILE"
+              echo "No split needed."
             fi
           done
 
@@ -182,44 +197,15 @@ jobs:
           {
             echo "Downloaded YouTube files are in this folder."
             echo
-            echo "If you see files like:"
-            echo "  video.mp4.part-000"
-            echo "  video.mp4.part-001"
-            echo "  video.mp4.part-002"
-            echo
-            echo "Reassemble them with:"
+            echo "If the file was split, reassemble with:"
             echo "  cat video.mp4.part-* > video.mp4"
             echo
             echo "Example:"
             echo "  cat *.mp4.part-* > output.mp4"
-            echo
-            echo "If the video was not split, just use the downloaded file directly."
           } > downloads/INSTRUCTIONS.txt
-
-          ls -lh downloads/INSTRUCTIONS.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-video
           path: downloads/*
-
-      - name: Commit and push downloads folder
-        run: |
-          set -eu
-          cd "$GITHUB_WORKSPACE"
-
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-
-          git add downloads/
-
-          if git diff --cached --quiet; then
-            echo "Nothing to commit"
-            exit 0
-          fi
-
-          git commit -m "Add downloaded YouTube video [skip ci]"
-          git pull --rebase origin "${GITHUB_REF_NAME}"
-          git push origin HEAD:"${GITHUB_REF_NAME}"
