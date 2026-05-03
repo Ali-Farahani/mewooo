@@ -13,6 +13,12 @@ on:
         required: true
         type: string
 
+      folder_name:
+        description: "Folder name inside downloads/"
+        required: true
+        default: "video"
+        type: string
+
       quality:
         description: "yt-dlp format selector"
         required: false
@@ -71,17 +77,24 @@ jobs:
           ffmpeg -version | head -n 1
 
       - name: Prepare workspace
+        env:
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
         run: |
           set -eu
           cd "$GITHUB_WORKSPACE"
 
-          mkdir -p downloads
+          if [ -z "${FOLDER_NAME:-}" ]; then
+            echo "ERROR: folder_name is required."
+            exit 1
+          fi
+
+          mkdir -p "downloads/$FOLDER_NAME"
           rm -f cookies.txt
 
-          # Clean previous downloaded files from downloads folder
-          find downloads -mindepth 1 -maxdepth 1 -type f -delete || true
+          # Clean previous files only inside selected folder
+          find "downloads/$FOLDER_NAME" -mindepth 1 -maxdepth 1 -type f -delete || true
 
-          ls -lh downloads/ || true
+          ls -lh "downloads/$FOLDER_NAME/" || true
 
       - name: Decode cookies
         env:
@@ -116,13 +129,14 @@ jobs:
         env:
           VIDEO_URL: ${{ github.event.inputs.url }}
           QUALITY: ${{ github.event.inputs.quality }}
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
         run: |
           set -eu
           cd "$GITHUB_WORKSPACE"
 
-          mkdir -p downloads
+          mkdir -p "downloads/$FOLDER_NAME"
 
-          echo "Downloading WITH cookies..."
+          echo "Downloading WITH cookies into downloads/$FOLDER_NAME ..."
 
           yt-dlp \
             --cookies cookies.txt \
@@ -134,15 +148,16 @@ jobs:
             --no-playlist \
             -f "$QUALITY" \
             --merge-output-format mp4 \
-            -o "downloads/%(title).200s [%(id)s].%(ext)s" \
+            -o "downloads/$FOLDER_NAME/%(title).200s [%(id)s].%(ext)s" \
             "$VIDEO_URL"
 
           echo "Downloaded files:"
-          ls -lh downloads/
+          ls -lh "downloads/$FOLDER_NAME/"
 
       - name: Split large files if needed
         env:
           SPLIT_MB: ${{ github.event.inputs.split_size_mb }}
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
         run: |
           set -eu
           cd "$GITHUB_WORKSPACE"
@@ -152,7 +167,7 @@ jobs:
           echo "Split limit: ${SPLIT_MB} MB"
           echo "Limit bytes: ${LIMIT_BYTES}"
 
-          find downloads -type f ! -name "*.part-*" ! -name "INSTRUCTIONS.txt" -print | while IFS= read -r FILE
+          find "downloads/$FOLDER_NAME" -type f ! -name "*.part-*" ! -name "INSTRUCTIONS.txt" -print | while IFS= read -r FILE
           do
             SIZE_BYTES="$(stat -c%s "$FILE")"
 
@@ -168,10 +183,12 @@ jobs:
             fi
           done
 
-          echo "Final downloads folder:"
-          ls -lh downloads/
+          echo "Final folder contents:"
+          ls -lh "downloads/$FOLDER_NAME/"
 
       - name: Write instructions
+        env:
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
         run: |
           set -eu
           cd "$GITHUB_WORKSPACE"
@@ -191,9 +208,9 @@ jobs:
             echo "  cat *.mp4.part-* > output.mp4"
             echo
             echo "If there is a normal .mp4 file and no .part-* files, just download the .mp4 file directly."
-          } > downloads/INSTRUCTIONS.txt
+          } > "downloads/$FOLDER_NAME/INSTRUCTIONS.txt"
 
-          ls -lh downloads/INSTRUCTIONS.txt
+          ls -lh "downloads/$FOLDER_NAME/INSTRUCTIONS.txt"
 
       - name: Commit and push downloads folder
         run: |
@@ -204,7 +221,6 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
 
-          # Important: do not commit cookies
           rm -f cookies.txt
 
           git add -A downloads/
