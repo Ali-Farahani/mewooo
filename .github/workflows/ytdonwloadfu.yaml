@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       urls:
-        description: "Video URLs, one URL per line"
+        description: "Video URLs. You can paste them line by line or separated by spaces."
         required: true
         type: string
       cookies_b64_list:
-        description: "Base64 cookies. Either one line for all URLs, or one line per URL"
+        description: "Base64 cookies. One line for all URLs, or one line per URL."
         required: true
         type: string
       folder_name:
@@ -29,13 +29,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -e
+
           sudo apt-get update
           sudo apt-get install -y ffmpeg python3 python3-pip coreutils
+
           python3 -m pip install --upgrade pip
           python3 -m pip install --upgrade yt-dlp
 
-            - name: Prepare inputs
+          yt-dlp --version
+
+      - name: Prepare inputs
         shell: bash
         run: |
           set -u
@@ -44,26 +50,32 @@ jobs:
 
           mkdir -p "downloads/$FOLDER_NAME"
           mkdir -p "tmp_cookies"
-          mkdir -p "logs"
 
           cat > urls_raw.txt <<'EOF_URLS'
-          ${{ github.event.inputs.urls }}
-          EOF_URLS
+${{ github.event.inputs.urls }}
+EOF_URLS
 
           cat > cookies_b64_raw.txt <<'EOF_COOKIES'
-          ${{ github.event.inputs.cookies_b64_list }}
-          EOF_COOKIES
+${{ github.event.inputs.cookies_b64_list }}
+EOF_COOKIES
 
-          # پاک‌سازی URLها:
-          # هم URLهای خط‌به‌خط را قبول می‌کند،
-          # هم URLهایی که با فاصله پشت سر هم paste شده‌اند.
+          # -----------------------------
+          # Prepare URLs
+          # -----------------------------
+          # این قسمت URLها را هم اگر خط‌به‌خط باشند،
+          # هم اگر با فاصله پشت سر هم paste شده باشند،
+          # به خط‌های جدا تبدیل می‌کند.
           tr -s '[:space:]' '\n' < urls_raw.txt \
             | sed 's/\r$//' \
             | sed '/^[[:space:]]*$/d' \
             > urls.txt
 
-          # پاک‌سازی کوکی‌ها:
+          # -----------------------------
+          # Prepare cookies
+          # -----------------------------
           # کوکی Base64 باید یک خط کامل باشد.
+          # اگر فقط یک کوکی داری، همان یک خط را بگذار.
+          # اگر برای هر URL کوکی جدا داری، هر کوکی باید یک خط جدا باشد.
           sed 's/\r$//' cookies_b64_raw.txt \
             | sed '/^[[:space:]]*$/d' \
             > cookies_b64_list.txt
@@ -74,8 +86,10 @@ jobs:
           echo "URL_COUNT=$URL_COUNT"
           echo "COOKIE_COUNT=$COOKIE_COUNT"
 
+          echo ""
           echo "Detected URLs:"
           cat urls.txt
+          echo ""
 
           if [ "$URL_COUNT" -eq 0 ]; then
             echo "ERROR: urls input is empty."
@@ -100,7 +114,6 @@ jobs:
           fi
 
           echo "Prepared successfully."
-
 
       - name: Download videos
         shell: bash
@@ -147,9 +160,12 @@ jobs:
             echo "========================================"
             echo "Processing item #$i"
             echo "$VIDEO_URL"
+            echo "========================================"
 
             LOG_FILE="downloads/$FOLDER_NAME/item-$i.log"
             COOKIE_FILE="tmp_cookies/cookies-$i.txt"
+
+            : > "$LOG_FILE"
 
             echo "========================================" >> "$REPORT_FILE"
             echo "Item #$i" >> "$REPORT_FILE"
@@ -172,7 +188,8 @@ jobs:
 
             rm -f "$COOKIE_FILE"
 
-            # Decode cookie
+            echo "Decoding cookie for item #$i" | tee -a "$LOG_FILE"
+
             if ! printf '%s' "$COOKIES_B64" | base64 -d > "$COOKIE_FILE" 2>> "$LOG_FILE"; then
               echo "FAILED: Base64 decode failed for item #$i" | tee -a "$LOG_FILE"
               echo "$VIDEO_URL" >> "$FAILED_FILE"
@@ -182,7 +199,6 @@ jobs:
               continue
             fi
 
-            # Validate cookie file
             if [ ! -s "$COOKIE_FILE" ]; then
               echo "FAILED: Cookie file is empty for item #$i" | tee -a "$LOG_FILE"
               echo "$VIDEO_URL" >> "$FAILED_FILE"
@@ -199,8 +215,6 @@ jobs:
 
             echo "Starting yt-dlp for item #$i" | tee -a "$LOG_FILE"
 
-            # دانلود ویدیو
-            # هر ویدیو جداگانه ذخیره می‌شود و اسم فایل را yt-dlp بر اساس title و id می‌سازد.
             if yt-dlp \
               --cookies "$COOKIE_FILE" \
               --no-playlist \
@@ -224,12 +238,24 @@ jobs:
 
           done < urls.txt
 
+          SUCCESS_COUNT=$(grep -cve '^[[:space:]]*$' "$SUCCESS_FILE" || true)
+          FAILED_COUNT=$(grep -cve '^[[:space:]]*$' "$FAILED_FILE" || true)
+
           echo "========================================" >> "$REPORT_FILE"
           echo "Download finished at: $(date -u)" >> "$REPORT_FILE"
-          echo "Successful:" >> "$REPORT_FILE"
-          wc -l "$SUCCESS_FILE" >> "$REPORT_FILE" || true
-          echo "Failed:" >> "$REPORT_FILE"
-          wc -l "$FAILED_FILE" >> "$REPORT_FILE" || true
+          echo "Success count: $SUCCESS_COUNT" >> "$REPORT_FILE"
+          echo "Failed count: $FAILED_COUNT" >> "$REPORT_FILE"
+
+          echo ""
+          echo "Success count: $SUCCESS_COUNT"
+          echo "Failed count: $FAILED_COUNT"
+
+          # اگر هیچ دانلود موفقی نبود، یک فایل علامت‌گذار می‌سازیم.
+          # ولی این step را fail نمی‌کنیم تا گزارش‌ها commit شوند.
+          if [ "$SUCCESS_COUNT" -eq 0 ]; then
+            echo "No successful downloads." >> "$REPORT_FILE"
+            touch "downloads/$FOLDER_NAME/NO_SUCCESSFUL_DOWNLOADS.txt"
+          fi
 
           rm -rf tmp_cookies
           rm -f urls_raw.txt cookies_b64_raw.txt urls.txt cookies_b64_list.txt
@@ -243,12 +269,13 @@ jobs:
 
           cd "downloads/$FOLDER_NAME"
 
-          # فایل‌های گزارشی و لاگ‌ها split نشوند
+          # فایل‌های گزارشی، لاگ‌ها و فایل‌های part شده دوباره split نشوند.
           find . -type f \
             ! -name "*.part_*" \
             ! -name "DOWNLOAD_REPORT.txt" \
             ! -name "FAILED_URLS.txt" \
             ! -name "SUCCESS_URLS.txt" \
+            ! -name "NO_SUCCESSFUL_DOWNLOADS.txt" \
             ! -name "item-*.log" \
             -size +90M | while IFS= read -r FILE
           do
@@ -276,5 +303,23 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Add downloaded videos"
+          git commit -m "Add downloaded videos and reports"
           git push
+
+      - name: Fail workflow if no video was downloaded
+        shell: bash
+        run: |
+          set -u
+
+          FOLDER_NAME="${{ github.event.inputs.folder_name }}"
+
+          if [ -f "downloads/$FOLDER_NAME/NO_SUCCESSFUL_DOWNLOADS.txt" ]; then
+            echo "ERROR: Workflow finished but no video was downloaded successfully."
+            echo "Check these files in the repository:"
+            echo "downloads/$FOLDER_NAME/DOWNLOAD_REPORT.txt"
+            echo "downloads/$FOLDER_NAME/FAILED_URLS.txt"
+            echo "downloads/$FOLDER_NAME/item-*.log"
+            exit 1
+          fi
+
+          echo "At least one video downloaded successfully."
