@@ -1,0 +1,153 @@
+      - name: Download videos
+        env:
+          QUALITY: ${{ github.event.inputs.quality }}
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
+        run: |
+          set -u
+          cd "$GITHUB_WORKSPACE"
+
+          mkdir -p "downloads/$FOLDER_NAME"
+          mkdir -p tmp_cookies
+
+          REPORT_FILE="downloads/$FOLDER_NAME/DOWNLOAD_REPORT.txt"
+          FAILED_FILE="downloads/$FOLDER_NAME/FAILED_URLS.txt"
+          SUCCESS_FILE="downloads/$FOLDER_NAME/SUCCESS_URLS.txt"
+
+          rm -f "$REPORT_FILE" "$FAILED_FILE" "$SUCCESS_FILE"
+
+          {
+            echo "YouTube download report"
+            echo "======================="
+            echo "Folder: downloads/$FOLDER_NAME"
+            echo "Started at: $(date -u)"
+            echo
+          } > "$REPORT_FILE"
+
+          i=0
+          success_count=0
+          fail_count=0
+
+          while IFS= read -r VIDEO_URL && IFS= read -r COOKIES_B64 <&3
+          do
+            i=$((i + 1))
+
+            COOKIE_FILE="tmp_cookies/${i}.txt"
+            LOG_FILE="downloads/$FOLDER_NAME/item-${i}.log"
+
+            echo "========================================"
+            echo "Processing item #$i"
+            echo "URL: $VIDEO_URL"
+            echo "Log: $LOG_FILE"
+
+            {
+              echo "----------------------------------------"
+              echo "Item #$i"
+              echo "URL: $VIDEO_URL"
+              echo "Time: $(date -u)"
+            } >> "$REPORT_FILE"
+
+            if [ -z "${VIDEO_URL:-}" ]; then
+              echo "ERROR: URL at item #$i is empty."
+              echo "FAILED #$i: EMPTY URL" >> "$REPORT_FILE"
+              echo "EMPTY_URL_AT_ITEM_$i" >> "$FAILED_FILE"
+              fail_count=$((fail_count + 1))
+              continue
+            fi
+
+            if [ -z "${COOKIES_B64:-}" ]; then
+              echo "ERROR: cookies_b64 at item #$i is empty."
+              echo "FAILED #$i: Empty cookies_b64" >> "$REPORT_FILE"
+              echo "$VIDEO_URL" >> "$FAILED_FILE"
+              fail_count=$((fail_count + 1))
+              continue
+            fi
+
+            rm -f "$COOKIE_FILE"
+
+            if ! printf '%s' "$COOKIES_B64" | base64 -d > "$COOKIE_FILE" 2>"$LOG_FILE"; then
+              echo "ERROR: Base64 decode failed for item #$i"
+              echo "FAILED #$i: Base64 decode failed" >> "$REPORT_FILE"
+              echo "$VIDEO_URL" >> "$FAILED_FILE"
+              fail_count=$((fail_count + 1))
+              continue
+            fi
+
+            if [ ! -s "$COOKIE_FILE" ]; then
+              echo "ERROR: Decoded cookie file for item #$i is empty."
+              echo "FAILED #$i: Decoded cookie file is empty" >> "$REPORT_FILE"
+              echo "$VIDEO_URL" >> "$FAILED_FILE"
+              fail_count=$((fail_count + 1))
+              continue
+            fi
+
+            if ! grep -q "Netscape HTTP Cookie File" "$COOKIE_FILE"; then
+              echo "ERROR: Cookie file for item #$i is not a valid Netscape cookies file."
+              echo "FAILED #$i: Invalid Netscape cookies file" >> "$REPORT_FILE"
+              echo "$VIDEO_URL" >> "$FAILED_FILE"
+              fail_count=$((fail_count + 1))
+              continue
+            fi
+
+            echo "Downloading item #$i with its own cookies..."
+
+            if yt-dlp \
+              --cookies "$COOKIE_FILE" \
+              --js-runtimes node \
+              --remote-components ejs:github \
+              --retries 10 \
+              --fragment-retries 10 \
+              --extractor-retries 10 \
+              --no-playlist \
+              -f "$QUALITY" \
+              --merge-output-format mp4 \
+              -o "downloads/$FOLDER_NAME/%(title).200s [%(id)s].%(ext)s" \
+              "$VIDEO_URL" >> "$LOG_FILE" 2>&1
+            then
+              echo "SUCCESS item #$i"
+              echo "SUCCESS #$i: $VIDEO_URL" >> "$REPORT_FILE"
+              echo "$VIDEO_URL" >> "$SUCCESS_FILE"
+              success_count=$((success_count + 1))
+            else
+              echo "ERROR: Download failed for item #$i"
+              echo "URL failed: $VIDEO_URL"
+              echo "FAILED #$i: yt-dlp download failed" >> "$REPORT_FILE"
+              echo "$VIDEO_URL" >> "$FAILED_FILE"
+              fail_count=$((fail_count + 1))
+              continue
+            fi
+
+          done < urls.txt 3< cookies_b64_list.txt
+
+          {
+            echo
+            echo "======================="
+            echo "Finished at: $(date -u)"
+            echo "Total items: $i"
+            echo "Successful: $success_count"
+            echo "Failed: $fail_count"
+            echo
+            echo "Failed URLs file: FAILED_URLS.txt"
+            echo "Successful URLs file: SUCCESS_URLS.txt"
+            echo "Individual logs: item-N.log"
+          } >> "$REPORT_FILE"
+
+          echo "========================================"
+          echo "Download summary:"
+          echo "Total: $i"
+          echo "Successful: $success_count"
+          echo "Failed: $fail_count"
+
+          echo
+          echo "Downloaded files:"
+          ls -lh "downloads/$FOLDER_NAME/" || true
+
+          echo
+          echo "Report:"
+          cat "$REPORT_FILE"
+
+          if [ "$fail_count" -gt 0 ]; then
+            echo
+            echo "Some URLs failed, but workflow will continue."
+            echo "Failed URLs:"
+            cat "$FAILED_FILE" || true
+          fi
