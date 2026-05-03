@@ -35,7 +35,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install --upgrade yt-dlp
 
-      - name: Prepare inputs
+            - name: Prepare inputs
         shell: bash
         run: |
           set -u
@@ -54,15 +54,28 @@ jobs:
           ${{ github.event.inputs.cookies_b64_list }}
           EOF_COOKIES
 
-          # پاک‌سازی خط‌های خالی و فاصله‌های اضافی
-          sed 's/\r$//' urls_raw.txt | sed '/^[[:space:]]*$/d' > urls.txt
-          sed 's/\r$//' cookies_b64_raw.txt | sed '/^[[:space:]]*$/d' > cookies_b64_list.txt
+          # پاک‌سازی URLها:
+          # هم URLهای خط‌به‌خط را قبول می‌کند،
+          # هم URLهایی که با فاصله پشت سر هم paste شده‌اند.
+          tr -s '[:space:]' '\n' < urls_raw.txt \
+            | sed 's/\r$//' \
+            | sed '/^[[:space:]]*$/d' \
+            > urls.txt
+
+          # پاک‌سازی کوکی‌ها:
+          # کوکی Base64 باید یک خط کامل باشد.
+          sed 's/\r$//' cookies_b64_raw.txt \
+            | sed '/^[[:space:]]*$/d' \
+            > cookies_b64_list.txt
 
           URL_COUNT=$(grep -cve '^[[:space:]]*$' urls.txt || true)
           COOKIE_COUNT=$(grep -cve '^[[:space:]]*$' cookies_b64_list.txt || true)
 
           echo "URL_COUNT=$URL_COUNT"
           echo "COOKIE_COUNT=$COOKIE_COUNT"
+
+          echo "Detected URLs:"
+          cat urls.txt
 
           if [ "$URL_COUNT" -eq 0 ]; then
             echo "ERROR: urls input is empty."
@@ -74,7 +87,6 @@ jobs:
             exit 1
           fi
 
-          # نکته مهم:
           # اگر فقط یک کوکی داده شده باشد، برای همه URLها استفاده می‌شود.
           # اگر بیشتر از یک کوکی داده شده باشد، باید تعداد کوکی‌ها با تعداد URLها برابر باشد.
           if [ "$COOKIE_COUNT" -ne 1 ] && [ "$COOKIE_COUNT" -ne "$URL_COUNT" ]; then
@@ -88,6 +100,7 @@ jobs:
           fi
 
           echo "Prepared successfully."
+
 
       - name: Download videos
         shell: bash
