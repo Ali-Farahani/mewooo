@@ -1,4 +1,4 @@
-      - name: Download videos
+      - name: Download videos2
         env:
           QUALITY: ${{ github.event.inputs.quality }}
           FOLDER_NAME: ${{ github.event.inputs.folder_name }}
