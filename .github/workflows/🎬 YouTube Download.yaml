@@ -1,139 +1,236 @@
-- name: Download videos
-  env:
-    QUALITY: ${{ github.event.inputs.quality }}
-    FOLDER_NAME: ${{ github.event.inputs.folder_name }}
-    COOKIES_B64: ${{ github.event.inputs.cookies_b64 }}
-  run: |
-    set -u
-    cd "$GITHUB_WORKSPACE"
+name: youtube-download
 
-    mkdir -p "downloads/$FOLDER_NAME"
-    mkdir -p tmp_cookies
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "YouTube video URL"
+        required: true
+        type: string
 
-    REPORT_FILE="downloads/$FOLDER_NAME/DOWNLOAD_REPORT.txt"
-    FAILED_FILE="downloads/$FOLDER_NAME/FAILED_URLS.txt"
-    SUCCESS_FILE="downloads/$FOLDER_NAME/SUCCESS_URLS.txt"
-    COOKIE_FILE="tmp_cookies/cookies.txt"
+      cookies_b64:
+        description: "Base64 content of cookies.txt"
+        required: true
+        type: string
 
-    rm -f "$REPORT_FILE" "$FAILED_FILE" "$SUCCESS_FILE" "$COOKIE_FILE"
+      folder_name:
+        description: "Folder name inside downloads/"
+        required: true
+        default: "video"
+        type: string
 
-    {
-      echo "YouTube download report"
-      echo "======================="
-      echo "Folder: downloads/$FOLDER_NAME"
-      echo "Started at: $(date -u)"
-      echo
-    } > "$REPORT_FILE"
+      quality:
+        description: "yt-dlp format selector"
+        required: false
+        default: "bv*+ba/b"
+        type: string
 
-    if [ -z "${COOKIES_B64:-}" ]; then
-      echo "ERROR: cookies_b64 is empty."
-      exit 1
-    fi
+      split_size_mb:
+        description: "Maximum size per file in MB"
+        required: false
+        default: "90"
+        type: string
 
-    if ! printf '%s' "$COOKIES_B64" | base64 -d > "$COOKIE_FILE"; then
-      echo "ERROR: Base64 decode failed."
-      exit 1
-    fi
+jobs:
+  download:
+    runs-on: ubuntu-latest
 
-    if [ ! -s "$COOKIE_FILE" ]; then
-      echo "ERROR: Decoded cookie file is empty."
-      exit 1
-    fi
+    permissions:
+      contents: write
 
-    if ! grep -q "Netscape HTTP Cookie File" "$COOKIE_FILE"; then
-      echo "ERROR: Cookie file is not a valid Netscape cookies file."
-      exit 1
-    fi
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-    i=0
-    success_count=0
-    fail_count=0
+      - name: Mark repo safe
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-    while IFS= read -r VIDEO_URL
-    do
-      i=$((i + 1))
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-      LOG_FILE="downloads/$FOLDER_NAME/item-${i}.log"
+      - name: Install tools
+        run: |
+          set -eu
 
-      echo "========================================"
-      echo "Processing item #$i"
-      echo "URL: $VIDEO_URL"
-      echo "Log: $LOG_FILE"
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg curl ca-certificates coreutils git
 
-      {
-        echo "----------------------------------------"
-        echo "Item #$i"
-        echo "URL: $VIDEO_URL"
-        echo "Time: $(date -u)"
-      } >> "$REPORT_FILE"
+          sudo curl -L \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+            -o /usr/local/bin/yt-dlp
 
-      if [ -z "${VIDEO_URL:-}" ]; then
-        echo "ERROR: URL at item #$i is empty."
-        echo "FAILED #$i: EMPTY URL" >> "$REPORT_FILE"
-        echo "EMPTY_URL_AT_ITEM_$i" >> "$FAILED_FILE"
-        fail_count=$((fail_count + 1))
-        continue
-      fi
+          sudo chmod +x /usr/local/bin/yt-dlp
 
-      echo "Downloading item #$i..."
+          echo "yt-dlp:"
+          yt-dlp --version
 
-      if yt-dlp \
-        --cookies "$COOKIE_FILE" \
-        --js-runtimes node \
-        --remote-components ejs:github \
-        --retries 10 \
-        --fragment-retries 10 \
-        --extractor-retries 10 \
-        --no-playlist \
-        -f "$QUALITY" \
-        --merge-output-format mp4 \
-        -o "downloads/$FOLDER_NAME/%(title).200s [%(id)s].%(ext)s" \
-        "$VIDEO_URL" >> "$LOG_FILE" 2>&1
-      then
-        echo "SUCCESS item #$i"
-        echo "SUCCESS #$i: $VIDEO_URL" >> "$REPORT_FILE"
-        echo "$VIDEO_URL" >> "$SUCCESS_FILE"
-        success_count=$((success_count + 1))
-      else
-        echo "ERROR: Download failed for item #$i"
-        echo "FAILED #$i: yt-dlp download failed" >> "$REPORT_FILE"
-        echo "$VIDEO_URL" >> "$FAILED_FILE"
-        fail_count=$((fail_count + 1))
-        continue
-      fi
+          echo "node:"
+          node --version
 
-    done < urls.txt
+          echo "ffmpeg:"
+          ffmpeg -version | head -n 1
 
-    {
-      echo
-      echo "======================="
-      echo "Finished at: $(date -u)"
-      echo "Total items: $i"
-      echo "Successful: $success_count"
-      echo "Failed: $fail_count"
-      echo
-      echo "Failed URLs file: FAILED_URLS.txt"
-      echo "Successful URLs file: SUCCESS_URLS.txt"
-      echo "Individual logs: item-N.log"
-    } >> "$REPORT_FILE"
+      - name: Prepare workspace
+        env:
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
 
-    echo "========================================"
-    echo "Download summary:"
-    echo "Total: $i"
-    echo "Successful: $success_count"
-    echo "Failed: $fail_count"
+          if [ -z "${FOLDER_NAME:-}" ]; then
+            echo "ERROR: folder_name is required."
+            exit 1
+          fi
 
-    echo
-    echo "Downloaded files:"
-    ls -lh "downloads/$FOLDER_NAME/" || true
+          mkdir -p "downloads/$FOLDER_NAME"
+          rm -f cookies.txt
 
-    echo
-    echo "Report:"
-    cat "$REPORT_FILE"
+          # Clean previous files only inside selected folder
+          find "downloads/$FOLDER_NAME" -mindepth 1 -maxdepth 1 -type f -delete || true
 
-    if [ "$fail_count" -gt 0 ]; then
-      echo
-      echo "Some URLs failed, but workflow will continue."
-      echo "Failed URLs:"
-      cat "$FAILED_FILE" || true
-    fi
+          ls -lh "downloads/$FOLDER_NAME/" || true
+
+      - name: Decode cookies
+        env:
+          COOKIES_B64: ${{ github.event.inputs.cookies_b64 }}
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          if [ -z "${COOKIES_B64:-}" ]; then
+            echo "ERROR: cookies_b64 is required."
+            exit 1
+          fi
+
+          echo "Decoding cookies..."
+
+          printf '%s' "$COOKIES_B64" | base64 -d > cookies.txt
+
+          if [ ! -s cookies.txt ]; then
+            echo "ERROR: cookies.txt is empty after decoding."
+            exit 1
+          fi
+
+          if ! grep -q "Netscape HTTP Cookie File" cookies.txt; then
+            echo "ERROR: cookies.txt does not look like a valid Netscape cookies file."
+            exit 1
+          fi
+
+          echo "cookies.txt decoded successfully."
+          ls -lh cookies.txt
+
+      - name: Download video
+        env:
+          VIDEO_URL: ${{ github.event.inputs.url }}
+          QUALITY: ${{ github.event.inputs.quality }}
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          mkdir -p "downloads/$FOLDER_NAME"
+
+          echo "Downloading WITH cookies into downloads/$FOLDER_NAME ..."
+
+          yt-dlp \
+            --cookies cookies.txt \
+            --js-runtimes node \
+            --remote-components ejs:github \
+            --retries 10 \
+            --fragment-retries 10 \
+            --extractor-retries 10 \
+            --no-playlist \
+            -f "$QUALITY" \
+            --merge-output-format mp4 \
+            -o "downloads/$FOLDER_NAME/%(title).200s [%(id)s].%(ext)s" \
+            "$VIDEO_URL"
+
+          echo "Downloaded files:"
+          ls -lh "downloads/$FOLDER_NAME/"
+
+      - name: Split large files if needed
+        env:
+          SPLIT_MB: ${{ github.event.inputs.split_size_mb }}
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          LIMIT_BYTES=$((SPLIT_MB * 1024 * 1024))
+
+          echo "Split limit: ${SPLIT_MB} MB"
+          echo "Limit bytes: ${LIMIT_BYTES}"
+
+          find "downloads/$FOLDER_NAME" -type f ! -name "*.part-*" ! -name "INSTRUCTIONS.txt" -print | while IFS= read -r FILE
+          do
+            SIZE_BYTES="$(stat -c%s "$FILE")"
+
+            echo "Checking: $FILE"
+            echo "Size: $SIZE_BYTES bytes"
+
+            if [ "$SIZE_BYTES" -gt "$LIMIT_BYTES" ]; then
+              echo "Splitting: $FILE"
+              split -b "${SPLIT_MB}M" -d -a 3 "$FILE" "${FILE}.part-"
+              rm -f "$FILE"
+            else
+              echo "No split needed."
+            fi
+          done
+
+          echo "Final folder contents:"
+          ls -lh "downloads/$FOLDER_NAME/"
+
+      - name: Write instructions
+        env:
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          {
+            echo "Downloaded YouTube files are in this folder."
+            echo
+            echo "If the video was split, you will see files like:"
+            echo "  video.mp4.part-000"
+            echo "  video.mp4.part-001"
+            echo "  video.mp4.part-002"
+            echo
+            echo "To reassemble split files on Linux:"
+            echo "  cat *.part-* > output.mp4"
+            echo
+            echo "Example:"
+            echo "  cat *.mp4.part-* > output.mp4"
+            echo
+            echo "If there is a normal .mp4 file and no .part-* files, just download the .mp4 file directly."
+          } > "downloads/$FOLDER_NAME/INSTRUCTIONS.txt"
+
+          ls -lh "downloads/$FOLDER_NAME/INSTRUCTIONS.txt"
+
+      - name: Commit and push downloads folder
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+          rm -f cookies.txt
+
+          git add -A downloads/
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "Add YouTube downloaded video [skip ci]"
+
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
