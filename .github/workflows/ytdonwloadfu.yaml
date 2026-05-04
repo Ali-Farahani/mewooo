@@ -1,21 +1,27 @@
-name: youtube-download
+name: YouTube Downloader
 
 on:
   workflow_dispatch:
     inputs:
-      urls:
-        description: "Video URLs, one URL per line"
-        required: true
-        type: string
-      cookies_b64_list:
-        description: "Base64 cookies. Either one line for all URLs, or one line per URL"
-        required: true
-        type: string
       folder_name:
-        description: "Output folder name inside downloads/"
+        description: "Folder name inside downloads/"
         required: true
         default: "youtube"
+
+      urls:
+        description: "YouTube URLs. Can be line-by-line, space-separated, or pasted together."
+        required: true
         type: string
+
+      cookies_b64_list:
+        description: "Base64 cookies. One per URL, or one cookie for all URLs. Separate by newline, space, comma, or semicolon."
+        required: true
+        type: string
+
+      quality:
+        description: "yt-dlp format selector"
+        required: true
+        default: "bv*[height<=720]+ba/b[height<=720]/best"
 
 permissions:
   contents: write
@@ -28,252 +34,414 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install yt-dlp and tools
         run: |
+          set -eu
           sudo apt-get update
           sudo apt-get install -y ffmpeg python3 python3-pip coreutils
           python3 -m pip install --upgrade pip
           python3 -m pip install --upgrade yt-dlp
-      - name: Prepare inputs
-        shell: bash
-        run: |
-          set -u
+          yt-dlp --version
+          ffmpeg -version | head -n 1
+          node --version
 
-          FOLDER_NAME="${{ github.event.inputs.folder_name }}"
+      - name: Prepare workspace and validate inputs
+        env:
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
+          URLS_RAW: ${{ github.event.inputs.urls }}
+          COOKIES_RAW: ${{ github.event.inputs.cookies_b64_list }}
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+
+          if [ -z "${FOLDER_NAME:-}" ]; then
+            echo "ERROR: folder_name is required."
+            exit 1
+          fi
 
           mkdir -p "downloads/$FOLDER_NAME"
           mkdir -p "tmp_cookies"
-          mkdir -p "logs"
 
-          cat > urls_raw.txt <<'EOF_URLS'
-          ${{ github.event.inputs.urls }}
-          EOF_URLS
+          rm -f urls.txt cookies_b64_list.txt
+          rm -f normalized_urls_raw.txt normalized_cookies_raw.txt
+          find "tmp_cookies" -type f -delete || true
 
-          cat > cookies_b64_raw.txt <<'EOF_COOKIES'
-          ${{ github.event.inputs.cookies_b64_list }}
-          EOF_COOKIES
+          echo "Preparing URL list..."
 
-          # پاک‌سازی URLها:
-          # هم URLهای خط‌به‌خط را قبول می‌کند،
-          # هم URLهایی که با فاصله پشت سر هم paste شده‌اند.
-          tr -s '[:space:]' '\n' < urls_raw.txt \
-            | sed 's/\r$//' \
+          # URL handling:
+          # 1. Converts every http:// or https:// occurrence into a new line.
+          # 2. This helps even if URLs are pasted together like:
+          #    https://youtube.com/...https://youtu.be/...
+          # 3. Then extracts URL-looking strings.
+          printf '%s\n' "$URLS_RAW" \
+            | tr '\r\t' '  ' \
+            | sed -E 's#(https?://)#\n\1#g' \
+            | tr -s '[:space:]' '\n' \
             | sed '/^[[:space:]]*$/d' \
-            > urls.txt
+            > normalized_urls_raw.txt
 
-          # پاک‌سازی کوکی‌ها:
-          # کوکی Base64 باید یک خط کامل باشد.
-          sed 's/\r$//' cookies_b64_raw.txt \
+          # Keep only http/https lines
+          grep -E '^https?://' normalized_urls_raw.txt > urls.txt || true
+
+          URL_COUNT=$(grep -cve '^[[:space:]]*$' urls.txt || true)
+
+          echo "Preparing cookies list..."
+
+          # Cookie handling:
+          # Cookies can be separated by:
+          # - newline
+          # - space
+          # - comma
+          # - semicolon
+          #
+          # Important:
+          # Completely glued multiple Base64 strings without separator cannot be split safely.
+          printf '%s\n' "$COOKIES_RAW" \
+            | tr '\r\t' '  ' \
+            | tr ',;' '\n\n' \
+            | tr -s '[:space:]' '\n' \
             | sed '/^[[:space:]]*$/d' \
             > cookies_b64_list.txt
 
-          URL_COUNT=$(grep -cve '^[[:space:]]*$' urls.txt || true)
           COOKIE_COUNT=$(grep -cve '^[[:space:]]*$' cookies_b64_list.txt || true)
 
           echo "URL_COUNT=$URL_COUNT"
           echo "COOKIE_COUNT=$COOKIE_COUNT"
 
+          echo
           echo "Detected URLs:"
-          cat urls.txt
+          nl -ba urls.txt || true
+
+          echo
+          echo "Detected cookie items:"
+          nl -ba cookies_b64_list.txt | sed 's/\(.*\)/[hidden cookie line]/' || true
 
           if [ "$URL_COUNT" -eq 0 ]; then
-            echo "ERROR: urls input is empty."
+            echo "ERROR: No valid URLs found."
+            echo "Make sure your URLs start with http:// or https://"
             exit 1
           fi
 
           if [ "$COOKIE_COUNT" -eq 0 ]; then
-            echo "ERROR: cookies_b64_list input is empty."
+            echo "ERROR: No cookies found."
+            echo "cookies_b64_list is empty or could not be parsed."
             exit 1
           fi
 
-          # اگر فقط یک کوکی داده شده باشد، برای همه URLها استفاده می‌شود.
-          # اگر بیشتر از یک کوکی داده شده باشد، باید تعداد کوکی‌ها با تعداد URLها برابر باشد.
           if [ "$COOKIE_COUNT" -ne 1 ] && [ "$COOKIE_COUNT" -ne "$URL_COUNT" ]; then
-            echo "ERROR: cookies_b64_list must contain either:"
-            echo "  - exactly 1 cookie line to use for all URLs"
-            echo "  - or the same number of cookie lines as URLs"
-            echo ""
-            echo "URLs: $URL_COUNT"
-            echo "Cookies: $COOKIE_COUNT"
+            echo "ERROR: Cookie count is invalid."
+            echo
+            echo "You provided:"
+            echo "  URLs:    $URL_COUNT"
+            echo "  Cookies: $COOKIE_COUNT"
+            echo
+            echo "Allowed modes:"
+            echo "  1 cookie  for all URLs"
+            echo "  N cookies for N URLs"
+            echo
+            echo "Fix cookies_b64_list by entering:"
+            echo "  - one Base64 cookie only"
+            echo "  - or exactly one Base64 cookie per URL"
+            echo
+            echo "Separators supported for cookies:"
+            echo "  newline, space, comma, semicolon"
             exit 1
           fi
 
-          echo "Prepared successfully."
+          echo
+          echo "Validating URL format..."
 
+          bad_url_count=0
+          while IFS= read -r url; do
+            case "$url" in
+              http://*|https://*)
+                ;;
+              *)
+                echo "BAD URL: $url"
+                bad_url_count=$((bad_url_count + 1))
+                ;;
+            esac
+          done < urls.txt
+
+          if [ "$bad_url_count" -gt 0 ]; then
+            echo "ERROR: Found $bad_url_count invalid URLs."
+            exit 1
+          fi
+
+          echo
+          echo "Input preparation finished successfully."
 
       - name: Download videos
-        shell: bash
+        env:
+          QUALITY: ${{ github.event.inputs.quality }}
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
         run: |
           set -u
+          cd "$GITHUB_WORKSPACE"
 
-          FOLDER_NAME="${{ github.event.inputs.folder_name }}"
+          mkdir -p "downloads/$FOLDER_NAME"
+          mkdir -p tmp_cookies
 
           REPORT_FILE="downloads/$FOLDER_NAME/DOWNLOAD_REPORT.txt"
           FAILED_FILE="downloads/$FOLDER_NAME/FAILED_URLS.txt"
           SUCCESS_FILE="downloads/$FOLDER_NAME/SUCCESS_URLS.txt"
 
-          : > "$REPORT_FILE"
-          : > "$FAILED_FILE"
-          : > "$SUCCESS_FILE"
+          rm -f "$REPORT_FILE" "$FAILED_FILE" "$SUCCESS_FILE"
+          touch "$FAILED_FILE" "$SUCCESS_FILE"
 
-          URL_COUNT=$(grep -cve '^[[:space:]]*$' urls.txt || true)
-          COOKIE_COUNT=$(grep -cve '^[[:space:]]*$' cookies_b64_list.txt || true)
+          {
+            echo "YouTube download report"
+            echo "======================="
+            echo "Folder: downloads/$FOLDER_NAME"
+            echo "Started at UTC: $(date -u)"
+            echo
+          } > "$REPORT_FILE"
 
-          echo "Download started at: $(date -u)" >> "$REPORT_FILE"
-          echo "URL_COUNT=$URL_COUNT" >> "$REPORT_FILE"
-          echo "COOKIE_COUNT=$COOKIE_COUNT" >> "$REPORT_FILE"
-          echo "" >> "$REPORT_FILE"
+          mapfile -t URLS < urls.txt
+          mapfile -t COOKIE_LINES < cookies_b64_list.txt
 
-          if [ "$COOKIE_COUNT" -eq 1 ]; then
-            USE_SINGLE_COOKIE=1
-            SINGLE_COOKIE_B64="$(head -n 1 cookies_b64_list.txt)"
-            echo "Mode: single cookie for all URLs" >> "$REPORT_FILE"
-          else
-            USE_SINGLE_COOKIE=0
-            echo "Mode: one cookie per URL" >> "$REPORT_FILE"
+          URL_COUNT="${#URLS[@]}"
+          COOKIE_COUNT="${#COOKIE_LINES[@]}"
+
+          echo "URL_COUNT=$URL_COUNT"
+          echo "COOKIE_COUNT=$COOKIE_COUNT"
+
+          if [ "$URL_COUNT" -eq 0 ]; then
+            echo "ERROR: No URLs found."
+            exit 1
           fi
 
-          echo "" >> "$REPORT_FILE"
+          if [ "$COOKIE_COUNT" -eq 0 ]; then
+            echo "ERROR: No cookies found."
+            exit 1
+          fi
 
-          i=0
+          if [ "$COOKIE_COUNT" -ne 1 ] && [ "$COOKIE_COUNT" -ne "$URL_COUNT" ]; then
+            echo "ERROR: Cookie count must be 1 or equal to URL count."
+            exit 1
+          fi
 
-          while IFS= read -r VIDEO_URL
-          do
-            [ -z "$VIDEO_URL" ] && continue
+          success_count=0
+          fail_count=0
 
-            i=$((i + 1))
+          for idx in "${!URLS[@]}"; do
+            i=$((idx + 1))
+            VIDEO_URL="${URLS[$idx]}"
+
+            COOKIE_FILE="tmp_cookies/${i}.txt"
+            LOG_FILE="downloads/$FOLDER_NAME/item-${i}.log"
+
+            : > "$LOG_FILE"
+
+            if [ "$COOKIE_COUNT" -eq 1 ]; then
+              COOKIES_B64="${COOKIE_LINES[0]}"
+              COOKIE_MODE="single-cookie-for-all"
+            else
+              COOKIES_B64="${COOKIE_LINES[$idx]}"
+              COOKIE_MODE="cookie-matched-by-index"
+            fi
 
             echo "========================================"
             echo "Processing item #$i"
-            echo "$VIDEO_URL"
+            echo "URL: $VIDEO_URL"
+            echo "Cookie mode: $COOKIE_MODE"
+            echo "Log: $LOG_FILE"
 
-            LOG_FILE="downloads/$FOLDER_NAME/item-$i.log"
-            COOKIE_FILE="tmp_cookies/cookies-$i.txt"
+            {
+              echo "----------------------------------------"
+              echo "Item #$i"
+              echo "URL: $VIDEO_URL"
+              echo "Cookie mode: $COOKIE_MODE"
+              echo "Time UTC: $(date -u)"
+            } >> "$REPORT_FILE"
 
-            echo "========================================" >> "$REPORT_FILE"
-            echo "Item #$i" >> "$REPORT_FILE"
-            echo "URL: $VIDEO_URL" >> "$REPORT_FILE"
-            echo "Log: item-$i.log" >> "$REPORT_FILE"
-
-            if [ "$USE_SINGLE_COOKIE" -eq 1 ]; then
-              COOKIES_B64="$SINGLE_COOKIE_B64"
-            else
-              COOKIES_B64="$(sed -n "${i}p" cookies_b64_list.txt)"
+            if [ -z "${VIDEO_URL:-}" ]; then
+              echo "ERROR: URL at item #$i is empty."
+              echo "FAILED #$i: Empty URL" >> "$REPORT_FILE"
+              echo "EMPTY_URL_AT_ITEM_$i" >> "$FAILED_FILE"
+              fail_count=$((fail_count + 1))
+              continue
             fi
 
-            if [ -z "$COOKIES_B64" ]; then
-              echo "FAILED: Empty cookie base64 for item #$i" | tee -a "$LOG_FILE"
+            case "$VIDEO_URL" in
+              http://*|https://*)
+                ;;
+              *)
+                echo "ERROR: Invalid URL at item #$i: $VIDEO_URL"
+                echo "FAILED #$i: Invalid URL" >> "$REPORT_FILE"
+                echo "$VIDEO_URL" >> "$FAILED_FILE"
+                fail_count=$((fail_count + 1))
+                continue
+                ;;
+            esac
+
+            if [ -z "${COOKIES_B64:-}" ]; then
+              echo "ERROR: cookies_b64 at item #$i is empty."
+              echo "FAILED #$i: Empty cookie Base64" >> "$REPORT_FILE"
               echo "$VIDEO_URL" >> "$FAILED_FILE"
-              echo "Status: FAILED - empty cookie base64" >> "$REPORT_FILE"
-              echo "" >> "$REPORT_FILE"
+              fail_count=$((fail_count + 1))
               continue
             fi
 
             rm -f "$COOKIE_FILE"
 
-            # Decode cookie
-            if ! printf '%s' "$COOKIES_B64" | base64 -d > "$COOKIE_FILE" 2>> "$LOG_FILE"; then
-              echo "FAILED: Base64 decode failed for item #$i" | tee -a "$LOG_FILE"
+            # Clean hidden whitespace from Base64
+            COOKIES_B64_CLEAN="$(printf '%s' "$COOKIES_B64" | tr -d '\r\n\t ')"
+
+            if [ -z "$COOKIES_B64_CLEAN" ]; then
+              echo "ERROR: Cleaned Base64 cookie is empty for item #$i"
+              echo "FAILED #$i: Empty cleaned Base64" >> "$REPORT_FILE"
               echo "$VIDEO_URL" >> "$FAILED_FILE"
-              echo "Status: FAILED - base64 decode failed" >> "$REPORT_FILE"
-              echo "" >> "$REPORT_FILE"
+              fail_count=$((fail_count + 1))
+              continue
+            fi
+
+            echo "Decoding cookie for item #$i..."
+
+            if ! printf '%s' "$COOKIES_B64_CLEAN" | base64 -d > "$COOKIE_FILE" 2>>"$LOG_FILE"; then
+              echo "ERROR: Base64 decode failed for item #$i"
+              echo "FAILED #$i: Base64 decode failed" >> "$REPORT_FILE"
+              echo "$VIDEO_URL" >> "$FAILED_FILE"
+              fail_count=$((fail_count + 1))
               rm -f "$COOKIE_FILE"
               continue
             fi
 
-            # Validate cookie file
             if [ ! -s "$COOKIE_FILE" ]; then
-              echo "FAILED: Cookie file is empty for item #$i" | tee -a "$LOG_FILE"
+              echo "ERROR: Decoded cookie file for item #$i is empty."
+              echo "FAILED #$i: Decoded cookie file is empty" >> "$REPORT_FILE"
               echo "$VIDEO_URL" >> "$FAILED_FILE"
-              echo "Status: FAILED - empty cookie file" >> "$REPORT_FILE"
-              echo "" >> "$REPORT_FILE"
+              fail_count=$((fail_count + 1))
               rm -f "$COOKIE_FILE"
               continue
             fi
 
-            if ! grep -q "Netscape HTTP Cookie File" "$COOKIE_FILE"; then
-              echo "WARNING: Cookie file does not contain Netscape header." | tee -a "$LOG_FILE"
-              echo "Continuing anyway..." | tee -a "$LOG_FILE"
+            # Check Netscape cookies format.
+            # A typical exported cookies.txt begins with:
+            # # Netscape HTTP Cookie File
+            if ! head -n 10 "$COOKIE_FILE" | grep -qi "Netscape HTTP Cookie File"; then
+              echo "ERROR: Cookie file for item #$i does not look like Netscape cookies.txt."
+              echo "FAILED #$i: Invalid Netscape cookie format" >> "$REPORT_FILE"
+              echo "$VIDEO_URL" >> "$FAILED_FILE"
+              fail_count=$((fail_count + 1))
+              rm -f "$COOKIE_FILE"
+              continue
             fi
 
-            echo "Starting yt-dlp for item #$i" | tee -a "$LOG_FILE"
+            echo "Cookie decoded and validated for item #$i"
+            echo "Starting yt-dlp for item #$i..."
 
-            # دانلود ویدیو
-            # هر ویدیو جداگانه ذخیره می‌شود و اسم فایل را yt-dlp بر اساس title و id می‌سازد.
             if yt-dlp \
               --cookies "$COOKIE_FILE" \
+              --js-runtimes node \
+              --remote-components ejs:github \
+              --retries 10 \
+              --fragment-retries 10 \
+              --extractor-retries 10 \
               --no-playlist \
+              -f "$QUALITY" \
               --merge-output-format mp4 \
-              -f "bv*+ba/best" \
               -o "downloads/$FOLDER_NAME/%(title).200s [%(id)s].%(ext)s" \
               "$VIDEO_URL" >> "$LOG_FILE" 2>&1
             then
-              echo "SUCCESS: $VIDEO_URL" | tee -a "$LOG_FILE"
+              echo "SUCCESS item #$i"
+              echo "SUCCESS #$i: $VIDEO_URL" >> "$REPORT_FILE"
               echo "$VIDEO_URL" >> "$SUCCESS_FILE"
-              echo "Status: SUCCESS" >> "$REPORT_FILE"
+              success_count=$((success_count + 1))
             else
-              echo "FAILED: yt-dlp failed for item #$i" | tee -a "$LOG_FILE"
+              echo "ERROR: Download failed for item #$i"
+              echo "FAILED #$i: yt-dlp download failed" >> "$REPORT_FILE"
               echo "$VIDEO_URL" >> "$FAILED_FILE"
-              echo "Status: FAILED - yt-dlp error" >> "$REPORT_FILE"
+              fail_count=$((fail_count + 1))
+              rm -f "$COOKIE_FILE"
+              continue
             fi
 
-            echo "" >> "$REPORT_FILE"
-
             rm -f "$COOKIE_FILE"
-
-          done < urls.txt
-
-          echo "========================================" >> "$REPORT_FILE"
-          echo "Download finished at: $(date -u)" >> "$REPORT_FILE"
-          echo "Successful:" >> "$REPORT_FILE"
-          wc -l "$SUCCESS_FILE" >> "$REPORT_FILE" || true
-          echo "Failed:" >> "$REPORT_FILE"
-          wc -l "$FAILED_FILE" >> "$REPORT_FILE" || true
-
-          rm -rf tmp_cookies
-          rm -f urls_raw.txt cookies_b64_raw.txt urls.txt cookies_b64_list.txt
-
-      - name: Split large files
-        shell: bash
-        run: |
-          set -u
-
-          FOLDER_NAME="${{ github.event.inputs.folder_name }}"
-
-          cd "downloads/$FOLDER_NAME"
-
-          # فایل‌های گزارشی و لاگ‌ها split نشوند
-          find . -type f \
-            ! -name "*.part_*" \
-            ! -name "DOWNLOAD_REPORT.txt" \
-            ! -name "FAILED_URLS.txt" \
-            ! -name "SUCCESS_URLS.txt" \
-            ! -name "item-*.log" \
-            -size +90M | while IFS= read -r FILE
-          do
-            echo "Splitting large file: $FILE"
-
-            split -b 90M "$FILE" "$FILE.part_"
-
-            rm -f "$FILE"
-
-            echo "Split completed: $FILE"
           done
 
-      - name: Commit and push results
-        shell: bash
+          {
+            echo
+            echo "======================="
+            echo "Finished at UTC: $(date -u)"
+            echo "Total items: $URL_COUNT"
+            echo "Successful: $success_count"
+            echo "Failed: $fail_count"
+            echo
+            echo "Failed URLs file: FAILED_URLS.txt"
+            echo "Successful URLs file: SUCCESS_URLS.txt"
+            echo "Individual logs: item-N.log"
+          } >> "$REPORT_FILE"
+
+          echo "========================================"
+          echo "Download summary:"
+          echo "Total: $URL_COUNT"
+          echo "Successful: $success_count"
+          echo "Failed: $fail_count"
+
+          echo
+          echo "Downloaded folder content:"
+          ls -lh "downloads/$FOLDER_NAME/" || true
+
+          echo
+          echo "Report:"
+          cat "$REPORT_FILE"
+
+          if [ "$fail_count" -gt 0 ]; then
+            echo
+            echo "Some URLs failed."
+            echo "Failed URLs:"
+            cat "$FAILED_FILE" || true
+          fi
+
+          if [ "$success_count" -eq 0 ]; then
+            echo
+            echo "ERROR: No video was downloaded successfully."
+            echo "Check downloads/$FOLDER_NAME/item-N.log files for details."
+            exit 1
+          fi
+
+      - name: Cleanup sensitive files
+        if: always()
         run: |
-          set -u
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+          rm -f cookies.txt || true
+          rm -f cookies_b64_list.txt || true
+          rm -f normalized_cookies_raw.txt || true
+          rm -rf tmp_cookies || true
 
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+      - name: Commit and push downloaded files
+        env:
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
 
-          git add downloads/
+          if [ ! -d "downloads/$FOLDER_NAME" ]; then
+            echo "ERROR: downloads/$FOLDER_NAME does not exist."
+            exit 1
+          fi
+
+          if [ ! -s "downloads/$FOLDER_NAME/SUCCESS_URLS.txt" ]; then
+            echo "ERROR: No successful downloads. Not committing logs only."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add "downloads/$FOLDER_NAME"
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "Add downloaded videos"
+          git commit -m "Add downloaded YouTube files to downloads/$FOLDER_NAME"
           git push
