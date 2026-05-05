@@ -1,8 +1,0 @@
-Downloaded offline bundle files are in this folder.
-
-If you see update.zip.part-000, update.zip.part-001, ... then reassemble with:
-  cat update.zip.part-* > update.zip
-
-Then install on your Debian system with:
-  sudo apt-offline install update.zip
-  sudo apt-get --no-download upgrade
